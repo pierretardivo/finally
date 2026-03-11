@@ -454,3 +454,65 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Review Notes
+
+*Added by doc-review — questions, clarifications, and simplification opportunities for implementing agents.*
+
+### Questions & Clarifications
+
+**Section 2 — User Experience**
+- **"Daily change %"** in the watchlist panel: with simulated data there is no prior day's close. Clarify whether this should show change since simulation start, change since page load, or be omitted from the simulator mode and only shown with real Massive API data.
+- **Sparklines on first load**: they start empty and fill progressively from SSE. Should there be a minimum number of data points before a sparkline is rendered, or should it draw a dot/flat line immediately?
+- **Watchlist additions auto-selected?** When the user adds a ticker to the watchlist, does it automatically appear selected in the main chart area, or does the user need to click it?
+
+**Section 6 — Market Data**
+- **SSE cadence vs Massive poll interval**: the SSE stream pushes at ~500ms but Massive only updates every 15s. Should the SSE server re-push the cached (unchanged) price every 500ms anyway, or only emit events when the price actually changes? Clarify to avoid unnecessary frontend flash animations on stale data.
+- **Dynamic ticker adds**: if the user adds a new ticker while the Massive poller is running, how soon does it appear in the price cache? Is there a forced poll on watchlist change, or does it wait for the next poll cycle?
+- **Massive API ticker validation**: when a ticker is added via the watchlist API, is there any validation that Massive supports it? Or does the error surface only when the poll comes back empty?
+
+**Section 7 — Database**
+- **Zero-quantity positions**: when all shares of a position are sold, should the row be deleted from `positions`, or retained with `quantity=0`? (Affects whether the positions table ever shows closed trades.)
+- **`portfolio_snapshots` startup behavior**: does the background snapshot task record an initial snapshot immediately on startup, or wait for the first 30-second interval? The P&L chart will be empty at fresh start either way, but clarity helps frontend handle the empty-state.
+- **`positions` table missing `created_at`**: intentional? Useful for displaying "position opened on…" in the UI.
+
+**Section 8 — API Endpoints**
+- **Missing: trade history endpoint** (`GET /api/trades`): the schema has a `trades` table but no endpoint exposes it. The positions table shows current holdings only; users have no way to view past executed trades without this.
+- **Missing: chat history endpoint** (`GET /api/chat`): on page refresh, conversation history is stored in SQLite but there's no endpoint to reload it into the frontend. Add `GET /api/chat` returning recent messages, or accept that chat resets on refresh.
+- **Missing: portfolio reset endpoint** (optional but useful for demo/course use): no way to return to $10k starting state without wiping the Docker volume.
+- **Response shapes not specified**: the shapes of `/api/portfolio`, `/api/watchlist`, and `/api/chat` responses are not defined. Agents will need to agree on these to avoid frontend/backend mismatch. Consider adding a response schema table or example JSON for each.
+
+**Section 9 — LLM Integration**
+- **Conversation history limit**: "loads recent conversation history" — how many messages? Without a cap, long sessions will bloat the prompt. Suggest specifying a limit (e.g., last 20 messages).
+- **LLM mock response shape**: Section 9 says `LLM_MOCK=true` returns "deterministic mock responses" but doesn't define what they look like. Agents writing E2E tests need to know the exact mock output to write reliable assertions.
+- **Skill reference in production spec**: "use cerebras-inference skill" is an agent workflow instruction, not production code guidance. The actual implementation detail (LiteLLM + OpenRouter + model ID) is already in the paragraph — consider separating agent workflow notes from the production spec to avoid confusion.
+- **Watchlist "remove" for non-existent ticker**: what should happen if the LLM emits `{"ticker": "XYZ", "action": "remove"}` for a ticker not on the watchlist? Silent no-op or error included in the response?
+
+**Section 10 — Frontend Design**
+- **Recharts is SVG-based, not canvas-based**: the technical note says "Canvas-based charting library preferred (Lightweight Charts or Recharts)" but Recharts uses SVG. If canvas performance is the goal, Lightweight Charts is the right pick. Clarify or remove Recharts from the suggestion.
+- **Chat panel initial state**: described as "docked/collapsible" — should it start open or collapsed on first load?
+- **Main chart initial state**: which ticker is shown in the main chart area before the user clicks one? First ticker in the watchlist (AAPL) is the obvious default — worth stating explicitly.
+
+**Section 11 — Docker & Deployment**
+- **Static file path ambiguity**: the Dockerfile copies the Next.js build "into a static/ directory" but doesn't specify `/app/static/` or similar. FastAPI's `StaticFiles` mount needs an exact path. Should be made explicit so the Dockerfile and FastAPI config agree.
+- **`docker-compose.yml` vs test compose**: `docker-compose.yml` is described as "optional convenience wrapper" but `test/docker-compose.test.yml` is required for E2E tests. Are these related? Should the optional one be removed to avoid confusion, or does it serve a distinct purpose?
+
+**Section 12 — Testing**
+- **How to run tests**: no commands are given for running unit tests (`pytest`, `npm test`) or E2E tests. Agents need these to verify their work.
+- **SSE disconnect simulation**: "disconnect and verify reconnection" is listed as an E2E scenario but Playwright has no built-in SSE disconnect primitive. Clarify the intended approach (e.g., `page.route()` to abort, or stop/restart the container).
+
+---
+
+### Simplification Opportunities
+
+1. **UUID PKs on watchlist and positions**: both tables have a UUID `id` PK plus a `UNIQUE(user_id, ticker)` constraint. Since the composite key is already unique, the UUID adds complexity without benefit. Consider using `(user_id, ticker)` as the composite primary key directly. This also simplifies the DELETE watchlist endpoint which currently uses `ticker` as the path param anyway.
+
+2. **`users_profile` table**: in single-user mode this will always have exactly one row (`id="default"`). Consider whether a dedicated table is worth the overhead vs. a simpler key-value config table or even a constant default cash balance with only the `cash_balance` field in a settings table.
+
+3. **Add missing endpoints now vs. later**: the missing trade history and chat history endpoints (noted above) will almost certainly be needed before the frontend is complete. Adding them to the spec now avoids a mid-build contract renegotiation between agents.
+
+4. **Consolidate response schemas into the API section**: currently response shapes are scattered across sections (database schema, LLM section, frontend notes). A single table of request/response JSON examples per endpoint would be the single source of truth for both frontend and backend agents.
+
+5. **Snapshot task could double as watchlist-price-cache**: the background task that records `portfolio_snapshots` every 30s already has access to all position prices. Consider whether this task and the price cache update task can be unified to reduce the number of independent background loops.
